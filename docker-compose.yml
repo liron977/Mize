@@ -1,0 +1,100 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  api-1: &api
+    build:
+      context: .
+      target: api
+    environment:
+      Redis__ConnectionString: redis:6379
+      Sqlite__Path: /data/reservations.db
+      Sqlite__MaxBatchSize: ${MAX_BATCH:-256}   # 1 = no batching (one commit per request), for comparison
+      RateLimit__Limit: "100"
+      RateLimit__WindowSeconds: "60"
+      # Retention policy for the ingest guard: with it enabled, updates for stays older than the cutoff are answered
+      # "Expired" (they may already be archived and purged). It MUST match the worker's policy. Off by default.
+      Retention__Enabled: ${RETENTION_ENABLED:-false}
+      Retention__RetentionDays: ${RETENTION_DAYS:-365}
+      # Logs: one JSON object per line (machine-readable). Set LOG_FORMAT=simple for plain text, and LOG_LEVEL_INGEST=Debug
+      # for one line per ingest request (off by default: it is one line per request).
+      Logging__Console__FormatterName: ${LOG_FORMAT:-json}
+      Logging__Console__FormatterOptions__IncludeScopes: "true"
+      Logging__LogLevel__Mize.Reservations.Api.Observability.IngestLogger: ${LOG_LEVEL_INGEST:-Information}
+    volumes:
+      - sqlite-data:/data          # shared by both instances (same host; not a network FS)
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api-2:
+    <<: *api
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-1
+      - api-2
+
+  # ---- Retention worker (opt-in): `docker compose --profile archive run --rm retention`
+  # Archives reservations whose stay ended more than RETENTION_DAYS ago, then deletes them. Nothing happens unless
+  # RETENTION_ENABLED=true. One run and exit by default; set RETENTION_INTERVAL_MINUTES to keep it running on a schedule.
+  retention:
+    profiles: ["archive"]
+    build:
+      context: .
+      target: worker
+    restart: "no"
+    environment:
+      Sqlite__Path: /data/reservations.db
+      Retention__Enabled: ${RETENTION_ENABLED:-false}
+      Retention__RetentionDays: ${RETENTION_DAYS:-365}
+      Retention__BatchSize: ${RETENTION_BATCH_SIZE:-1000}
+      Retention__DryRun: ${RETENTION_DRY_RUN:-false}
+      Retention__RunIntervalMinutes: ${RETENTION_INTERVAL_MINUTES:-0}
+      Archive__Provider: ${ARCHIVE_PROVIDER:-FileSystem}        # FileSystem | S3
+      Archive__FileSystem__Path: /archive
+      # S3 / S3-compatible server (used when ARCHIVE_PROVIDER=S3): leave the endpoint empty for AWS S3.
+      Archive__S3__ServiceUrl: ${S3_ENDPOINT:-}
+      Archive__S3__Bucket: ${S3_BUCKET:-reservation-archive}
+      Archive__S3__Region: ${S3_REGION:-us-east-1}
+      Archive__S3__AccessKey: ${S3_ACCESS_KEY:-}
+      Archive__S3__SecretKey: ${S3_SECRET_KEY:-}
+      Archive__S3__CreateBucketIfMissing: ${S3_CREATE_BUCKET:-false}
+      Logging__Console__FormatterName: ${LOG_FORMAT:-json}
+      Logging__Console__FormatterOptions__IncludeScopes: "true"
+    volumes:
+      - sqlite-data:/data          # the same database the API writes to
+      - archive-data:/archive      # the directory archive (FileSystem provider)
+
+  # ---- S3-compatible archive server (opt-in): `MINIO_ROOT_PASSWORD=... docker compose --profile minio up -d minio`
+  # The official MinIO images are no longer published, so this is the pgsty community fork of MinIO (AGPL-3.0), pinned by DIGEST
+  # (version RELEASE.2026-08-04T00-00-00Z) so what runs is exactly what was tested. For development and CI; use real S3 for
+  # the archive of record. The password has no default on purpose: without one MinIO refuses to start (it needs 8+ characters)
+  # instead of running with a guessable credential. Published on localhost only.
+  minio:
+    profiles: ["minio"]
+    image: pgsty/minio@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data"]
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mizeminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - minio-data:/data
+
+volumes:
+  sqlite-data:
+  archive-data:
+  minio-data:

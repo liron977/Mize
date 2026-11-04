@@ -1,0 +1,14 @@
+bin/
+obj/
+data/
+.vs/
+
+# IDE and local files
+.idea/
+*.user
+*.DotSettings.user
+
+# test and coverage output
+TestResults/
+coverage*/
+*.cobertura.xml

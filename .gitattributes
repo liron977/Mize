@@ -1,0 +1,3 @@
+# keep shell scripts runnable on Linux/macOS/Docker regardless of the checkout platform
+*.sh text eol=lf
+*.py text eol=lf

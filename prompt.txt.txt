@@ -1,0 +1,60 @@
+Before writing any code, please create a detailed System Architecture & Design Plan for  the following home task:
+
+BACKGROUND
+
+Think of this like Mize's own systems: we receive reservation updates (on multiple server instances) from several external suppliers through a webhook-style feed. 
+Suppliers sometimes resend the same update more than once (network retries, bugs on their end), and some suppliers send far more traffic than they should. 
+We need a small service that sits in front of our reservations table and handles both problems.
+
+WHAT TO BUILD
+
+An ASP.NET Core Web API (.NET 8+) backed by SQL (SQLite or LocalDB — your choice, either is fine) using Dapper for data access.
+
+Endpoints:
+
+1. POST /api/reservations/ingest
+
+   Request Body:
+   {
+     "supplierId": "string",
+     "reservationId": "string",
+     "roomId": "string",
+     "checkIn": "2026-08-01T00:00:00Z",
+     "checkOut": "2026-08-03T00:00:00Z",
+     "price": 450.00,
+     "updatedAtUtc": "2026-07-01T10:15:00Z"
+   }
+
+   - Save the reservation.
+   - If this exact reservation was already saved with the same details, don't write it again — respond in a way that makes clear nothing changed.
+   - If the same reservationId arrives again but with different details, update the existing record.
+   - If a supplier sends more than 100 requests within any rolling 60-second window, reject that supplier's further requests until the window clears.
+
+2. GET /api/reservations/stats/{supplierId}
+   Return how many reservations were ingested vs. how many requests were throttled for that supplier.
+
+Baseline expectations: 
+a clean project structure, reasonable error handling, and enough tests to give us confidence the dedup and throttle logic actually work. 
+
+We don't expect production-level hardening (auth, observability, etc.) — this is a scoped exercise.
+
+That's the spec as given. Real feature requests are rarely fully specified — if something's unclear, handle it the way you would on the job.
+
+
+
+1. API Endpoints & Contracts:
+   - POST /api/reservations/ingest: Receives reservation JSON payload (supplierId, reservationId, roomId, checkIn, checkOut, price, updatedAtUtc).
+   - GET /api/reservations/stats/{supplierId}: Returns metrics for a specific supplier (total ingested vs. total throttled requests).
+
+2. Deduplication & Upsert Logic (SQLite + Dapper):
+   - If an exact reservation already exists with identical details -> skip writing and respond indicating no change.
+   - If the same reservationId arrives with newer/different details -> update the existing record (Upsert).
+
+3. Lossless Queuing, Throttling & Rate Limiting:
+   - Rolling 60-second window rate limiter per supplier (max 100 requests/minute).
+   - If a supplier exceeds 100 requests in the window, throttle/reject further requests (or queue them losslessly via a Channel + Background Worker with retry mechanism, tracking throttled counts for the stats endpoint).
+
+4. Testing Strategy:
+   - Outline how we will unit/integration test the Deduplication logic and the Rate Limiting / Throttling behavior.
+
+Please output ONLY the Design Plan document first and wait for my approval before generating any files or code.
