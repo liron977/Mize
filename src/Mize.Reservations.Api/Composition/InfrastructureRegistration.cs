@@ -8,7 +8,7 @@ namespace Mize.Reservations.Api.Composition;
 /// so the application (Core + endpoints) never names an engine.
 ///
 /// To add an engine: implement the port in its own project, give it an <c>AddXxx(IServiceCollection)</c> extension,
-/// add one case below, and run the shared contract tests against it (see the README "Extension points").
+/// add one case below, and run the shared contract tests against it (see docs/DESIGN.md "Extension points").
 /// </summary>
 public static class InfrastructureRegistration
 {

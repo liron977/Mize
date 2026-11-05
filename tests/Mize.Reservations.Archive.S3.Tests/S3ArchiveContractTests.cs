@@ -29,7 +29,7 @@ public sealed class S3ArchiveContractTests : ArchiveContract
 
     protected override string? SkipReason => Configured ? null :
         "No S3 server configured. Set MIZE_S3_ENDPOINT (and MIZE_S3_ACCESS_KEY / MIZE_S3_SECRET_KEY) to run these against " +
-        "MinIO or another S3-compatible server, or MIZE_S3_BUCKET to run against AWS S3. See the README, Data retention.";
+        "MinIO or another S3-compatible server, or MIZE_S3_BUCKET to run against AWS S3. See docs/DESIGN.md, Data retention.";
 
     protected override Task<(IReservationArchive Archive, Func<Task>? Cleanup)> CreateAsync()
     {

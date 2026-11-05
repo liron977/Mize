@@ -89,19 +89,27 @@ public sealed class IngestApiTests(RedisFixture redis) : IDisposable
         var c1 = NewClient(); var c2 = NewClient();
         string a = S(), b = S();
 
+        // Body of any unexpected answer is kept, so a rare failure explains itself instead of only saying "expected 100 but was 99".
         var sends = Enumerable.Range(0, 150).Select(i => Task.Run(async () =>
-            (await (i % 2 == 0 ? c1 : c2).PostAsJsonAsync("/api/reservations/ingest", Payload(a, id: $"a{i}"))).StatusCode));
-        var codes = await Task.WhenAll(sends);
+        {
+            var r = await (i % 2 == 0 ? c1 : c2).PostAsJsonAsync("/api/reservations/ingest", Payload(a, id: $"a{i}"));
+            var unexpected = r.StatusCode is HttpStatusCode.Created or HttpStatusCode.TooManyRequests ? null : await r.Content.ReadAsStringAsync();
+            return (r.StatusCode, unexpected);
+        }));
+        var results = await Task.WhenAll(sends);
+        var codes = results.Select(r => r.StatusCode).ToArray();
+        var summary = string.Join(", ", codes.GroupBy(x => x).OrderBy(g => (int)g.Key).Select(g => $"{(int)g.Key} x{g.Count()}"))
+                      + string.Concat(results.Where(r => r.unexpected is not null).Take(3).Select(r => $"{Environment.NewLine}  unexpected {(int)r.StatusCode}: {r.unexpected}"));
 
-        codes.Count(x => x == HttpStatusCode.Created).Should().Be(100);
-        codes.Count(x => x == HttpStatusCode.TooManyRequests).Should().Be(50);
+        codes.Count(x => x == HttpStatusCode.Created).Should().Be(100, "of 150 parallel requests, 100 must be accepted. Got: {0}", summary);
+        codes.Count(x => x == HttpStatusCode.TooManyRequests).Should().Be(50, "and 50 throttled. Got: {0}", summary);
 
         // supplier B is unaffected by A being throttled
         (await c1.PostAsJsonAsync("/api/reservations/ingest", Payload(b))).StatusCode.Should().Be(HttpStatusCode.Created);
 
         var sa = await c2.GetFromJsonAsync<StatsDto>($"/api/reservations/stats/{a}");
         var sb = await c2.GetFromJsonAsync<StatsDto>($"/api/reservations/stats/{b}");
-        (sa!.Ingested, sa.Throttled).Should().Be((100, 50));
+        (sa!.Ingested, sa.Throttled).Should().Be((100, 50), "the stored counters must match the answers. Answers were: {0}", summary);
         (sb!.Ingested, sb.Throttled).Should().Be((1, 0));
     }
 

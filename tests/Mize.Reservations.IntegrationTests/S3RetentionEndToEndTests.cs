@@ -20,7 +20,7 @@ internal sealed class S3Env : IAsyncDisposable
 {
     public const string SkipMessage =
         "No S3 server configured. Set MIZE_S3_ENDPOINT (and MIZE_S3_ACCESS_KEY / MIZE_S3_SECRET_KEY) to run against MinIO or another " +
-        "S3-compatible server, or MIZE_S3_BUCKET to run against AWS S3. See the README, Data retention.";
+        "S3-compatible server, or MIZE_S3_BUCKET to run against AWS S3. See docs/DESIGN.md, Data retention.";
 
     private static string? Var(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : null;
 

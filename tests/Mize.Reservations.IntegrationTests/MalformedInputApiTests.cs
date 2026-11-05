@@ -151,7 +151,7 @@ public sealed class MalformedInputApiTests(RedisFixture redis) : IDisposable
 
     // A body with NO Content-Length (Transfer-Encoding: chunked) cannot be sent through the in-process test server: it buffers every
     // request and declares its length. That branch is covered by RequestBodyReaderTests (unit) and was checked by hand against the real
-    // Kestrel server with curl (see the README).
+    // Kestrel server with curl (see docs/DESIGN.md).
 
     [Fact]
     public async Task A_missing_supplier_id_is_a_400_saying_it_is_required_and_costs_no_quota()
