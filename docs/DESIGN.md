@@ -451,59 +451,91 @@ are real, supported adapters, but only used by the optional retention worker.
 ## Testing
 
 ```
-dotnet test tests/Mize.Reservations.UnitTests          # no dependencies
-dotnet test tests/Mize.Reservations.IntegrationTests   # needs Docker (Testcontainers starts a real Redis)
-dotnet test tests/Mize.Reservations.Archive.S3.Tests    # skipped unless you point it at an S3 server (see Data retention)
+dotnet test tests/Mize.Reservations.UnitTests          # no dependencies, about 10 s (281 tests)
+dotnet test tests/Mize.Reservations.IntegrationTests   # needs Docker (Testcontainers starts a real Redis), about 1 min (161 tests)
+dotnet test tests/Mize.Reservations.Archive.S3.Tests    # 13 tests, skipped unless you point it at an S3 server (see Data retention)
 ```
 
-- **Unit tests:** the business rules (`ReservationDecider`, validation, `IngestService` with fakes), and the limiter
-  decorator and the verification limiter's window arithmetic against a manual clock, and the architecture rules.
-- **Contract suites** (`tests/Mize.Reservations.Contracts`, engine-agnostic, observing state only through the ports):
-  - `StorageContract` runs against SQLite with batching on and off: every dedup outcome, the freshness-marker rule,
-    stale handling, supplier independence, 50 concurrent identical requests, exact counters under heavy concurrency.
-  - `RateLimiterContract` runs against the verification-only in-memory limiter; `DistributedRateLimiterContract` runs against Redis alone
-    and against Redis behind the block cache (the composition the app uses): exactly the limit allowed, rolling (not
-    fixed-bucket) window, denied requests not consuming quota, supplier isolation, 300 concurrent requests across two
-    instances allowing exactly 100.
-- **Swappability proof:** `StorageContract` also runs against the verification-only in-memory storage adapter; the whole
-  API runs on swapped storage and limiter with no SQLite and no Redis; and architecture tests enforce the dependency
-  rules (Core depends on nothing, adapters never on each other, engine packages confined, product never references the
-  verification adapters). See [Architecture](#architecture-and-extension-points).
-- **Timing-sensitive tests.** The rate-limiter contract tests use the real clock. Only the rolling-window test has two-sided timing
-  (one batch of requests must have expired while the next must not have), and a stalled test host once stretched its sleeps
-  from 3.3 s to 5 s and made a correct limiter look wrong. It now measures its own timings and repeats the attempt when the
-  host was too slow for the scenario to be valid; a real bug still fails every valid attempt (checked by temporarily turning the
-  limiter into a fixed bucket, which the test then caught). The other real-clock tests only wait for "at least this long", so a
-  stall cannot break them.
-- **Retention:** `RetentionStoreContract` (cutoff boundary, ordering, keyset paging, delete-only-if-unchanged) runs against SQLite
-  and the in-memory store; `ArchiveContract` (round trip, idempotent rewrite, hostile supplier ids, no escape from the root,
-  5,000-row batch) runs against the directory archive and, when you provide a server, S3 (13 of 13 pass against `pgsty/minio`). Unit tests cover `RetentionService`
-  with fakes (archive-before-delete order, archive failure, crash and rerun, changed-row skip, paging, dry run, disabled) and
-  the `Expired` guard (strict boundary, still costs quota, `Invalid` stays `Invalid`). Integration tests run the whole thing on
-  real SQLite plus the real directory archive: old rows move and recent ones stay, a crash after archiving loses nothing and
-  creates no duplicate objects, a supplier update mid-pass keeps the live row, an unavailable archive deletes nothing, a late
-  update after a purge is `Expired` and not resurrected, 5,000 rows move in batches, plus the API answering `Expired` over HTTP.
-  The same scenarios run with the S3 archive in `S3RetentionEndToEndTests` (move and idempotent rerun, crash after archiving,
-  a supplier update mid-pass, 3,000 rows in batches): those four are skipped with instructions unless an S3 server is
-  configured (`MIZE_S3_ENDPOINT` or `MIZE_S3_BUCKET`), and a fifth needs no server (an unreachable S3 endpoint must delete
-  nothing). They pass against `pgsty/minio` and leave the bucket empty. The whole flow was also run by hand against the real
-  Docker images (see Data retention).
-- **Observability:** every ingest outcome is counted and timed once under its own tag (including `error`), rate-limit decisions
-  (`allowed`, `denied`, `blocked_locally`, `unavailable`) are counted by the decorator, no metric carries a supplier label, the
-  group-commit batch sizes add up to the writes, `queue_full` rejections are counted and the queue-depth gauge reads what is
-  waiting. Against the real composition (real Redis and SQLite) `/metrics` returns Prometheus text with the expected series
-  and seconds-scale buckets. Log tests assert that a throttle flood yields one warning naming the supplier, an outage yields one
-  error line (with its exception) while every request is still a 503 and is counted, per-request lines are off by default and
-  appear with supplier, reservation, outcome and time when Debug is enabled, and startup logs one summary. `LogSampler` is tested
-  for suppression, skip counts, independence of keys and concurrency. Meter assertions use a private meter factory per test, so
-  parallel tests cannot see each other; `/metrics` assertions are lower bounds for the same reason.
-- **SQLite-specific:** group commit (a failing item doesn't affect its batch, bounded queue, shutdown drain, durable
-  before acknowledged) and the coalesced throttle counter (a 5,000-request flood fits in one queue slot, counts exact,
-  doesn't starve other suppliers).
-- **API end to end:** create / duplicate / update / stale with stats; the 101st request is 429 with `Retry-After`; 150
-  parallel requests across two instances give exactly 100 accepted; a Redis outage returns 503 and writes nothing; the
-  limiter swapped through the port runs the API with no Redis; `RateLimit:Provider=InMemory`, `Storage:Provider=InMemory`
-  and any unknown provider fail fast at startup.
+**The rule that decides where a test lives.** An integration test must run the *full real path*: a real HTTP host, the real Redis
+limiter and real SQLite (the retention tests: real SQLite plus the real archive). If a test swaps an adapter for an in-memory one, or
+injects a fake that throws, it is not proving the real path, so it is a unit test, even when it starts the host. Likewise a test
+that only checks how one input is parsed belongs next to the parser, not behind HTTP.
+
+### Unit tests (`tests/Mize.Reservations.UnitTests`, no Docker)
+- **Rules:** `ReservationDecider`, `IngestValidator` and `IngestService` (with fakes), the strict payload parser
+  (`IngestRequestParserTests`, the full matrix of wrong types, timestamps, prices, identifier limits and years), checkOut-after-checkIn
+  by instant, the bounded body reader (`RequestBodyReader`: exact limit, no declared length, endless stream, cancellation).
+- **Error handling:** `ExceptionHandlingMiddleware` called directly (framework 4xx keeps its status with a generic message, a client
+  disconnect is swallowed, any other cancellation is a 500) and `UnexpectedErrorApiTests` (a repository that throws, injected into the
+  host: generic 500, no leak, logged with its exception every time, counted as `error`).
+- **Bounded memory:** `LogSampler` and `BlockCachingRateLimiter` forget quiet keys and expired blocks once past 10,000 entries, and
+  never forget a key with a suppressed count or a block still in force (manual clock).
+- **Limiter decorator and the verification limiter** against a manual clock; **architecture rules** (Core depends on nothing,
+  adapters never on each other, engine packages confined, the product never references the verification adapters).
+- **Swappability:** `FullySwappedApiTests` (the whole API on in-memory storage and limiter: no SQLite, no Redis, SQLite never
+  touched) and `RateLimiterSwapApiTests` (limiter swapped through the port; `RateLimit:Provider=InMemory`, `Storage:Provider=InMemory`
+  and any unknown provider fail fast at startup). The in-memory adapters also pass the same contract suites
+  (`InMemoryAdapterContractTests`, `InMemoryStorageContractTests`).
+- **Group commit** (`WriteBatcherTests`, real SQLite file, no HTTP): a failing item doesn't affect its batch, bounded queue, shutdown
+  drain, durable before acknowledged, and the coalesced throttle counter (a 5,000-request flood fits in one queue slot, counts exact,
+  doesn't starve other suppliers); `WriteBatcherMetricsTests` checks the batch-size histogram, timing and queue-depth gauge.
+- **Retention logic:** `RetentionService` with fakes (archive-before-delete order, archive failure, crash and rerun, changed-row
+  skip, paging, dry run, disabled) and the `Expired` guard (strict boundary, still costs quota, `Invalid` stays `Invalid`).
+
+### Contract suites (`tests/Mize.Reservations.Contracts`)
+Engine-agnostic, observing state only through the ports, run against every adapter. The real adapters run in the integration project,
+the in-memory ones in the unit project.
+- `StorageContract`: SQLite with batching on and off, and in-memory. Every dedup outcome, the freshness-marker rule, stale handling,
+  supplier independence, 50 concurrent identical requests, exact counters under heavy concurrency.
+- `RateLimiterContract` (in-memory) and `DistributedRateLimiterContract` (Redis alone, and Redis behind the block cache, the composition
+  the app uses): exactly the limit allowed, rolling (not fixed-bucket) window, denied requests not consuming quota, supplier isolation,
+  300 concurrent requests across two instances allowing exactly 100.
+- `RetentionStoreContract` (SQLite and in-memory): cutoff boundary, ordering, keyset paging, delete-only-if-unchanged.
+  `ArchiveContract` (directory archive and, when you provide a server, S3: 13 of 13 pass against `pgsty/minio`): round trip,
+  idempotent rewrite, hostile supplier ids, no escape from the root, 5,000-row batch.
+
+### Integration tests (`tests/Mize.Reservations.IntegrationTests`, full real path)
+All use `ApiInstance` (an in-process host with the real composition, pointed at the Redis container and a temp SQLite file). Several
+read the SQLite file directly, so they check what was *stored*, not only the status code.
+- `IngestApiTests`: create / duplicate / concurrent identical payloads across two instances create once; the 101st request is 429 with
+  `Retry-After`; a 300-request throttle flood is counted exactly and doesn't disturb another supplier; 150 parallel requests across two
+  instances give exactly 100 accepted; supplier id case and whitespace share one quota; a Redis outage returns 503 and writes nothing.
+  If the shared-limit test ever fails, its message lists the status counts and any unexpected response bodies.
+- `MainFlowDatabaseTests`: the spec scenario step by step with the stored row asserted after each step (normalised supplier, UTC times,
+  price in cents, duplicate leaves the row identical, timestamp-only update touches only `UpdatedAtUtc`, update in place, stale ignored,
+  composite key independence, invalid stores nothing, DB stats equal API stats); the 101st request leaves exactly 100 rows; two instances
+  under 150 parallel requests store exactly the accepted ids; 40 identical parallel requests make 1 row; Redis down writes nothing.
+- `FailureModesApiTests`: a full write queue answers only 201 or 503 with `Retry-After`, stores exactly what was accepted and recovers;
+  a database locked by another connection answers 503 after the busy timeout, reads keep working, and it recovers when released.
+- `MalformedInputApiTests` and `StayDatesApiTests`: one case per *kind* of answer (empty or non-JSON body, non-object, wrong content type
+  415, oversize 413, missing supplier, bad timestamp, bad price, checkOut not after checkIn), each a problem+json that names the field,
+  stores nothing and costs quota where it should. The full matrix is in the parser and validator unit tests.
+- `RetentionApiTests`: with retention on, an update for an expired stay is `200 Expired` and never stored; off by default.
+- **Observability** (`MetricsEndpointTests`, `LoggingApiTests`): `/metrics` returns Prometheus text with the expected series, seconds-scale
+  buckets and no supplier label; a throttle flood yields one warning naming the supplier; a limiter outage yields one error line with its
+  exception while every request is still a 503 and is counted; per-request lines are off by default and appear with Debug; startup logs one
+  summary. Meter assertions are lower bounds because parallel hosts share meters by name.
+- **Retention end to end** (`RetentionEndToEndTests`, real SQLite and real directory archive): old rows move and recent ones stay; a crash
+  after archiving loses nothing and creates no duplicate objects; a supplier update mid-pass keeps the live row; an unavailable archive
+  deletes nothing; a late update after a purge is `Expired` and not resurrected; 5,000 rows move in batches; dry run changes nothing;
+  incremental auto-vacuum, the covering index and space reclaim. `S3RetentionEndToEndTests` runs the same scenarios against S3: four are
+  skipped with instructions unless `MIZE_S3_ENDPOINT` (or `MIZE_S3_BUCKET`) is set, a fifth needs no server (an unreachable S3 endpoint must
+  delete nothing). All pass against `pgsty/minio` and leave the bucket empty.
+
+### Timing-sensitive tests
+The rate-limiter contract tests use the real clock. Only the rolling-window test has two-sided timing (one batch must have expired while the
+next must not have), and a stalled test host once stretched its sleeps from 3.3 s to 5 s and made a correct limiter look wrong. It now
+measures its own timings and repeats the attempt when the host was too slow for the scenario to be valid; a real bug still fails every valid
+attempt (checked by turning the limiter into a fixed bucket, which the test then caught). The other real-clock tests only wait for "at least
+this long", so a stall cannot break them.
+
+### Coverage and manual checks
+- `tools/coverage_report.py` summarises a coverlet result for the service's own code: run
+  `dotnet test tests/Mize.Reservations.IntegrationTests --collect:"XPlat Code Coverage" --results-directory <dir>`, then
+  `python tools/coverage_report.py <dir> --main-flow --lines` (classes on the ingest/stats path and their uncovered lines; `--min 99.9`
+  shows only classes below 99.9%). Ignore `LoggerMessage.g.cs`: it is source-generated.
+- `tools/throttle-test.ps1 [-Supplier X]` checks the rate limit against a running stack (105 requests: 100 accepted, 5 throttled, an
+  immediate follow-up still 429 with `Retry-After`, another supplier unaffected, stats match). `tools/try-flow.sh` walks every behaviour with curl.
 
 ## Alternatives considered
 
