@@ -744,24 +744,27 @@ numbers are dominated by the test client and are not a benchmark.
 ## Repository layout
 
 ```
-src/Mize.Reservations.Core                    models, ports, business rules (decider, validator, ingest service). No infrastructure.
-src/Mize.Reservations.Storage.Sqlite          SQLite + Dapper adapter: repositories, schema init, WriteBatcher (group commit), DI
+README.md, docs/DESIGN.md                     the half-page overview; this document
+src/Mize.Reservations.Core                    models, ports, business rules (decider, validator, ingest service, retention service, metrics). No infrastructure.
+src/Mize.Reservations.Storage.Sqlite          SQLite + Dapper adapter: repositories, schema init, WriteBatcher (group commit), retention store, DI
 src/Mize.Reservations.RateLimiting            generic limiter parts: block-cache decorator, options, DI
 src/Mize.Reservations.RateLimiting.Redis      Redis sliding-window limiter (Lua) + DI; the only project that references Redis
-src/Mize.Reservations.Archive.FileSystem       directory archive adapter (atomic, flushed writes); Core only
+src/Mize.Reservations.Archive.FileSystem      directory archive adapter (atomic, flushed writes); Core only
 src/Mize.Reservations.Archive.S3              S3 / S3-compatible archive adapter (AWS SDK); the only project that references the AWS SDK
 src/Mize.Reservations.Retention.Worker        separate run-and-exit (or interval) process: archives, then purges; chooses the archive by config
-src/Mize.Reservations.Api                     endpoints, error middleware, composition root (provider switches)
-tests/Mize.Reservations.Contracts             reusable, engine-agnostic contract suites (Storage, RetentionStore, Archive, RateLimiter)
+src/Mize.Reservations.Api                     endpoints, strict payload parser, bounded body reader, error middleware, logs and log sampling, composition root (provider switches)
+tests/Mize.Reservations.Contracts             reusable, engine-agnostic contract suites (Storage, RetentionStore, Archive, RateLimiter) and the meter probe
 tests/Mize.Reservations.Storage.InMemory      VERIFICATION ONLY: second storage engine (Core-only) proving the ports are swappable
 tests/Mize.Reservations.RateLimiting.InMemory VERIFICATION ONLY: in-process limiter proving IRateLimiter is swappable (blocked in the app)
-tests/Mize.Reservations.UnitTests             rules, validation, ingest service, limiter arithmetic, architecture rules (no dependencies)
-tests/Mize.Reservations.IntegrationTests      contracts run against each adapter, retention end to end, swapped-adapter API, group commit (Docker for Redis)
+tests/Mize.Reservations.UnitTests             no Docker: rules, parser matrix, middleware, bounded memory, group commit (real SQLite file), swapped-adapter API tests, in-memory contracts, architecture rules
+tests/Mize.Reservations.IntegrationTests      full real path (real host, Redis, SQLite): API flows and stored rows, failure modes, malformed input, observability, retention end to end, real-adapter contracts (Docker for Redis)
 tests/Mize.Reservations.Archive.S3.Tests      ArchiveContract against YOUR S3-compatible server via env vars; skipped when none is configured
 tools/try-flow.sh, tools/show_db.py           walk through every behaviour with curl; show the rows and counters in the database
+tools/throttle-test.ps1                       checks the rate limit against a running stack (100 accepted, rest 429, isolation, stats)
 tools/run-local.ps1                           run the API on Windows with the database on your disk (to open it in Rider)
 tools/loadtest.ps1                            end-to-end concurrent load test against the compose stack
 tools/floodtest.ps1                           throttle-flood test: one noisy supplier vs calm ones; checks counts are exact
+tools/coverage_report.py                      summarise a coverlet result for the service's own code and list uncovered lines
 tools/DbBench                                 data-layer benchmark (batching off vs on)
 Dockerfile, docker-compose.yml, nginx/        packaging: two API instances behind nginx, Redis, shared SQLite volume; `--profile archive` adds the worker, `--profile minio` an S3-compatible server
 ```
